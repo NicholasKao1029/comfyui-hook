@@ -179,6 +179,37 @@ app.registerExtension({
         // Add the dropdown to the menu
         menu.append(maxIdleTimeoutDropdown);
 
+        api.queuePrompt = async function(number, { output, workflow }) {
+            const body = {
+                client_id: this.clientId,
+                prompt: output,
+                extra_data: { extra_pnginfo: { workflow } },
+            };
+        
+            if (number === -1) {
+                body.front = true;
+            } else if (number != 0) {
+                body.number = number;
+            }
+        
+            const res = await this.fetchApi("/custom-prompt", {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                },
+                body: JSON.stringify(body),
+            });
+        
+            if (res.status !== 200) {
+                throw {
+                    response: await res.json(),
+                };
+            }
+        
+            return await res.json();
+        }.bind(api);
+
+
         // // create a paragraph element with a description of what the max idle timeout is
         // const maxIdleTimeoutDescription = document.createElement("p");
         // maxIdleTimeoutDescription.textContent = "The max GPU idle time is the max. amount of time that the GPU will be kept alive after the last prompt you ran. If the GPU is idle (ie., no prompts were ran) for longer than this max idle time, it will be shut down. The next time you queue a new prompt, the GPU will automatically be started up again.\n\nThis help us save your costs.";

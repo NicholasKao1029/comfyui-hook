@@ -109,6 +109,7 @@ def convert_to_websocket_url(server_address):
 # @server.PromptServer.instance.routes.post("/comfyui-deploy/prompt")
 @server.PromptServer.instance.routes.post("/custom-prompt")
 async def comfy_deploy_prompt(request):
+    prompt_server = server.PromptServer.instance
     json_data = await request.json()
 
     if "number" in json_data:
@@ -142,8 +143,8 @@ async def comfy_deploy_prompt(request):
                 extra_data["client_id"] = json_data["client_id"]
                 client_id = json_data["client_id"]
             
-            ws.connect("{}/ws?clientId={}".format(
-                    convert_to_websocket_url(server_address), client_id))
+            ws.connect("{}/ws?clientId={}".format(convert_to_websocket_url(server_address), client_id))
+
             response = queue_prompt(json_data["prompt"], client_id, server_address)
             prompt_id = response['prompt_id']
             response =  web.json_response(response, status=200)
@@ -180,738 +181,78 @@ async def background_process(ws, prompt_id, client_id, server_address):
                         img_type = image['type']
                         view_url = "{}/view?filename={}&subfolder={}&type={}".format(server_address, filename, subfolder, img_type)
                         # Download the image
+                async with aiohttp.ClientSession() as session:
+                    for image in images:
+                        filename = image['filename']
+                        subfolder = image['subfolder']
+                        img_type = image['type']
+                        view_url = f"{server_address}/view?filename={filename}&subfolder={subfolder}&type={img_type}"
                         async with session.get(view_url) as response:
                             if response.status == 200:
-                                print('view image response 200')
-                                # Assuming the downloaded file needs to be saved temporarily before upload
-                                temp_file_path = f"temp_{filename}"
-                                async with aiofiles.open(temp_file_path, 'wb') as temp_file:
-                                    while True:
-                                        chunk = await response.content.read(1024)  # Adjust chunk size as needed
-                                        if not chunk:
-                                            break
-                                        await temp_file.write(chunk)
-                                print(f'written to {temp_file_path}')
-
-                                # Upload the image
-                                async with aiofiles.open(temp_file_path, 'rb') as temp_file:
-                                    data = aiohttp.FormData()
-                                    data.add_field('image', temp_file, filename=filename, content_type='multipart/form-data')
-                                    if subfolder:  # Adding subfolder if exists
-                                        data.add_field('subfolder', subfolder)
-                                    if img_type: 
-                                        data.add_field('type', img_type)
-                                    upload_response = await session.post(f"{server_address}/upload/image", data=data)
-                                    upload_result = await upload_response.text()
-                                    print(f"Upload result: {upload_result}")
-
-                                # Clean up the temporary file
-                                os.remove(temp_file_path)
-
+                                image_data = await response.read()
+                                post = {
+                                    "image": {"filename": filename, "file": image_data},
+                                    "overwrite": "true",
+                                    "type": img_type,
+                                    "subfolder": subfolder
+                                }
+                                # Assuming image_upload is now an async function
+                                image_upload(post)
                 print("executed")
             await server.PromptServer.instance.send(event, ws_data, client_id)
         else:
             continue 
     return
 
-@server.PromptServer.instance.routes.post("/comfyui-deploy/run")
-async def comfy_deploy_run(request):
-    prompt_server = server.PromptServer.instance
-    data = await request.json()
+def get_dir_by_type(dir_type):
+    if dir_type is None:
+        dir_type = "input"
 
-    workflow_api = data.get("workflow_api")
+    if dir_type == "input":
+        type_dir = folder_paths.get_input_directory()
+    elif dir_type == "temp":
+        type_dir = folder_paths.get_temp_directory()
+    elif dir_type == "output":
+        type_dir = folder_paths.get_output_directory()
 
-    # The prompt id generated from comfy deploy, can be None
-    prompt_id = data.get("prompt_id")
+    return type_dir, dir_type
 
-    for key in workflow_api:
-        if 'inputs' in workflow_api[key] and 'seed' in workflow_api[key]['inputs']:
-            workflow_api[key]['inputs']['seed'] = randomSeed()
+def image_upload(post):
+    image = post.get("image")
+    overwrite = post.get("overwrite")
 
-    prompt = {
-        "prompt": workflow_api,
-        "client_id": "comfy_deploy_instance", #api.client_id
-        "prompt_id": prompt_id
-    }
+    image_upload_type = post.get("type")
+    upload_dir, image_upload_type = get_dir_by_type(image_upload_type)
 
-    prompt_metadata[prompt_id] = {
-        'status_endpoint': data.get('status_endpoint'),
-        'file_upload_endpoint': data.get('file_upload_endpoint'),
-        'workflow_api': workflow_api
-    }
+    if image and image.get('file'):
+        filename = image.get('filename')
+        if not filename:
+            raise 'no filename'
 
-    try:
-        res = post_prompt(prompt)
-    except Exception as e:
-        error_type = type(e).__name__
-        stack_trace_short = traceback.format_exc().strip().split('\n')[-2]
-        stack_trace = traceback.format_exc().strip()
-        print(f"error: {error_type}, {e}")
-        print(f"stack trace: {stack_trace_short}")
-        await update_run_with_output(prompt_id, {
-            "error": {
-                "error_type": error_type,
-                "stack_trace": stack_trace
-            }
-        })
-         # When there are critical errors, the prompt is actually not run
-        await update_run(prompt_id, Status.FAILED)
-        return web.Response(status=500, reason=f"{error_type}: {e}, {stack_trace_short}")
+        subfolder = post.get("subfolder", "")
+        full_output_folder = os.path.join(upload_dir, os.path.normpath(subfolder))
+        filepath = os.path.abspath(os.path.join(full_output_folder, filename))
 
-    status = 200
-    # if "error" in res:
-    #     status = 400
-    #     await update_run_with_output(prompt_id, {
-    #         "error": {
-    #             **res
-    #         }
-    #     })
-    
-    if "node_errors" in res and res["node_errors"]:
-        # Even tho there are node_errors it can still be run
-        status = 400
-        await update_run_with_output(prompt_id, {
-            "error": {
-                **res
-            }
-        })
+        if os.path.commonpath((upload_dir, filepath)) != upload_dir:
+            raise 'upload dir does nott have a common path with filepath'
 
-        # When there are critical errors, the prompt is actually not run
-        if "error" in res:
-            await update_run(prompt_id, Status.FAILED)
+        if not os.path.exists(full_output_folder):
+            os.makedirs(full_output_folder)
 
-    return web.json_response(res, status=status)
+        split = os.path.splitext(filename)
 
-sockets = dict()
-
-def get_comfyui_path_from_file_path(file_path):
-    file_path_parts = file_path.split("\\")
-
-    if file_path_parts[0] == "input":
-        print("matching input")
-        file_path = os.path.join(folder_paths.get_directory_by_type("input"), *file_path_parts[1:])
-    elif file_path_parts[0] == "models":
-        print("matching models")
-        file_path = folder_paths.get_full_path(file_path_parts[1], os.path.join(*file_path_parts[2:]))
-
-    print(file_path)
-
-    return file_path
-
-# Form ComfyUI Manager
-async def compute_sha256_checksum(filepath):
-    print("computing sha256 checksum")
-    chunk_size = 1024 * 256  # Example: 256KB
-    filepath = get_comfyui_path_from_file_path(filepath)
-    """Compute the SHA256 checksum of a file, in chunks, asynchronously"""
-    sha256 = hashlib.sha256()
-    async with aiofiles.open(filepath, 'rb') as f:
-        while True:
-            chunk = await f.read(chunk_size)
-            if not chunk:
-                break
-            sha256.update(chunk)
-    return sha256.hexdigest()
-
-# def hash_chunk(start_end, filepath):
-#     """Hash a specific chunk of the file."""
-#     start, end = start_end
-#     sha256 = hashlib.sha256()
-#     with open(filepath, 'rb') as f:
-#         f.seek(start)
-#         chunk = f.read(end - start)
-#         sha256.update(chunk)
-#     return sha256.digest()  # Return the digest of the chunk
-
-# async def compute_sha256_checksum(filepath):
-#     file_size = os.path.getsize(filepath)
-#     parts = 1  # Or any other division based on file size or desired concurrency
-#     part_size = file_size // parts
-#     start_end_ranges = [(i * part_size, min((i + 1) * part_size, file_size)) for i in range(parts)]
-    
-#     print(start_end_ranges, file_size)
-
-#     loop = asyncio.get_running_loop()
-
-#     # Use ThreadPoolExecutor to process chunks in parallel
-#     with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-#         futures = [loop.run_in_executor(executor, hash_chunk, start_end, filepath) for start_end in start_end_ranges]
-#         chunk_hashes = await asyncio.gather(*futures)
-
-#     # Combine the hashes sequentially
-#     final_sha256 = hashlib.sha256()
-#     for chunk_hash in chunk_hashes:
-#         final_sha256.update(chunk_hash)
-
-#     return final_sha256.hexdigest()
-
-# def hash_chunk(filepath):
-#     chunk_size = 1024 * 256  # 256KB per chunk
-#     sha256 = hashlib.sha256()
-#     with open(filepath, 'rb') as f:
-#         while True:
-#             chunk = f.read(chunk_size)
-#             if not chunk:
-#                 break  # End of file
-#             sha256.update(chunk)
-#     return sha256.hexdigest()
-
-# async def compute_sha256_checksum(filepath):
-#     print("computing sha256 checksum")
-#     filepath = get_comfyui_path_from_file_path(filepath)
-    
-#     loop = asyncio.get_running_loop()
-    
-#     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-#         task = loop.run_in_executor(executor, hash_chunk, filepath)
-    
-#     return await task
-
-# This is start uploading the files to Comfy Deploy
-@server.PromptServer.instance.routes.post('/comfyui-deploy/upload-file')
-async def upload_file(request):
-    data = await request.json()
-
-    file_path = data.get("file_path")
-
-    print("Original file path", file_path)
-
-    file_path = get_comfyui_path_from_file_path(file_path)
-
-    # return web.json_response({
-    #     "error": f"File not uploaded"
-    # }, status=500)
-
-    token = data.get("token")
-    get_url = data.get("url")
-
-    try:
-        base = folder_paths.base_path
-        file_path = os.path.join(base, file_path)
-        
-        if os.path.exists(file_path):
-            file_size = os.path.getsize(file_path)
-            file_extension = os.path.splitext(file_path)[1]
-
-            if file_extension in ['.jpg', '.jpeg']:
-                file_type = 'image/jpeg'
-            elif file_extension == '.png':
-                file_type = 'image/png'
-            elif file_extension == '.webp':
-                file_type = 'image/webp'
-            else:
-                file_type = 'application/octet-stream'  # Default to binary file type if unknown
-        else:
-            return web.json_response({
-                "error": f"File not found: {file_path}"
-            }, status=404)
-
-    except Exception as e:
-        return web.json_response({
-            "error": str(e)
-        }, status=500)
-
-    if get_url:
-        try:
-            async with aiohttp.ClientSession() as session:
-                headers = {'Authorization': f'Bearer {token}'}
-                params = {'file_size': file_size, 'type': file_type}
-                async with session.get(get_url, params=params, headers=headers) as response:
-                    if response.status == 200:
-                        content = await response.json()
-                        upload_url = content["upload_url"]
-
-                        with open(file_path, 'rb') as f:
-                            headers = {
-                                "Content-Type": file_type,
-                                "x-amz-acl": "public-read",
-                                "Content-Length": str(file_size)
-                            }
-                            async with session.put(upload_url, data=f, headers=headers) as upload_response:
-                                if upload_response.status == 200:
-                                    return web.json_response({
-                                        "message": "File uploaded successfully",
-                                        "download_url": content["download_url"]
-                                    })
-                                else:
-                                    return web.json_response({
-                                        "error": f"Failed to upload file to {upload_url}. Status code: {upload_response.status}"
-                                    }, status=upload_response.status)
-                    else:
-                        return web.json_response({
-                            "error": f"Failed to fetch data from {get_url}. Status code: {response.status}"
-                        }, status=response.status)
-        except Exception as e:
-            return web.json_response({
-                "error": f"An error occurred while fetching data from {get_url}: {str(e)}"
-            }, status=500)
-        
-    return web.json_response({
-        "error": f"File not uploaded"
-    }, status=500)
-        
-
-@server.PromptServer.instance.routes.get('/comfyui-deploy/get-file-hash')
-async def get_file_hash(request):
-    file_path = request.rel_url.query.get('file_path', '')
-
-    if file_path is None:
-        return web.json_response({
-            "error": "file_path is required"
-        }, status=400)
-    
-    try:
-        base = folder_paths.base_path
-        file_path = os.path.join(base, file_path)
-        # print("file_path", file_path)
-        start_time = time.time()  # Capture the start time
-        file_hash = await compute_sha256_checksum(
-            file_path
-        )
-        end_time = time.time()  # Capture the end time after the code execution
-        elapsed_time = end_time - start_time  # Calculate the elapsed time
-        print(f"Execution time: {elapsed_time} seconds")
-        return web.json_response({
-            "file_hash": file_hash
-        })
-    except Exception as e:
-        return web.json_response({
-            "error": str(e)
-        }, status=500)
-
-@server.PromptServer.instance.routes.get('/comfyui-deploy/ws')
-async def websocket_handler(request):
-    ws = web.WebSocketResponse()
-    await ws.prepare(request)
-    sid = request.rel_url.query.get('clientId', '')
-    if sid:
-        # Reusing existing session, remove old
-        sockets.pop(sid, None)
-    else:
-        sid = uuid.uuid4().hex
-
-    sockets[sid] = ws
-
-    try:
-        # Send initial state to the new client
-        await send("status", { 'sid': sid }, sid)
-
-        if cd_enable_log:
-            await send_first_time_log(sid)
-            
-        async for msg in ws:
-            if msg.type == aiohttp.WSMsgType.ERROR:
-                print('ws connection closed with exception %s' % ws.exception())
-    finally:
-        sockets.pop(sid, None)
-    return ws
-
-@server.PromptServer.instance.routes.get('/comfyui-deploy/check-status')
-async def comfy_deploy_check_status(request):
-    prompt_server = server.PromptServer.instance
-    prompt_id = request.rel_url.query.get('prompt_id', None)
-    if prompt_id in prompt_metadata and 'status' in prompt_metadata[prompt_id]:
-        return web.json_response({
-            "status": prompt_metadata[prompt_id]['status'].value
-        })
-    else:
-        return web.json_response({
-            "message": "prompt_id not found"
-        })
-
-async def send(event, data, sid=None):
-    try:
-        if sid:
-            ws = sockets.get(sid)
-            if ws != None and not ws.closed:  # Check if the WebSocket connection is open and not closing
-                await ws.send_json({ 'event': event, 'data': data })
-        else:
-            for ws in sockets.values():
-                if not ws.closed:  # Check if the WebSocket connection is open and not closing
-                    await ws.send_json({ 'event': event, 'data': data })
-    except Exception as e:
-        print(f"Exception: {e}")
-        traceback.print_exc()
-
-logging.basicConfig(level=logging.INFO)
-
-prompt_server = server.PromptServer.instance
-
-send_json = prompt_server.send_json
-async def send_json_override(self, event, data, sid=None):
-    # print("INTERNAL:", event, data, sid)
-    prompt_id = data.get('prompt_id')
-
-    # now we send everything
-    await asyncio.wait([
-        asyncio.create_task(send(event, data)),
-        asyncio.create_task(self.send_json_original(event, data, sid))
-    ])
-
-    if event == 'execution_start':
-        update_run(prompt_id, Status.RUNNING)
-
-    # the last executing event is none, then the workflow is finished
-    if event == 'executing' and data.get('node') is None:
-        mark_prompt_done(prompt_id=prompt_id)
-        if not have_pending_upload(prompt_id):
-            update_run(prompt_id, Status.SUCCESS)
-
-    if event == 'executing' and data.get('node') is not None:
-        node = data.get('node')
-        
-        if prompt_id in prompt_metadata:
-            if 'progress' not in prompt_metadata[prompt_id]:
-                prompt_metadata[prompt_id]["progress"] = set()
-                
-            prompt_metadata[prompt_id]["progress"].add(node)
-            calculated_progress = len(prompt_metadata[prompt_id]["progress"]) / len(prompt_metadata[prompt_id]['workflow_api'])
-            # print("calculated_progress", calculated_progress)
-            
-            if 'last_updated_node' in prompt_metadata[prompt_id] and prompt_metadata[prompt_id]['last_updated_node'] == node:
-                return
-            prompt_metadata[prompt_id]['last_updated_node'] = node
-            class_type = prompt_metadata[prompt_id]['workflow_api'][node]['class_type']
-            print("updating run live status", class_type)
-            await update_run_live_status(prompt_id, "Executing " + class_type, calculated_progress)
-
-    if event == 'execution_cached' and data.get('nodes') is not None:
-        if prompt_id in prompt_metadata:
-            if 'progress' not in prompt_metadata[prompt_id]:
-                prompt_metadata[prompt_id]["progress"] = set()
-            
-            if 'nodes' in data:
-                for node in data.get('nodes', []):
-                    prompt_metadata[prompt_id]["progress"].add(node)
-            # prompt_metadata[prompt_id]["progress"].update(data.get('nodes'))
-
-    if event == 'execution_error':
-        # Careful this might not be fully awaited.
-        await update_run_with_output(prompt_id, data)
-        update_run(prompt_id, Status.FAILED)
-        # await update_run_with_output(prompt_id, data)
-
-    if event == 'executed' and 'node' in data and 'output' in data:
-        await update_run_with_output(prompt_id, data.get('output'), node_id=data.get('node'))
-        # await update_run_with_output(prompt_id, data.get('output'), node_id=data.get('node'))
-        # update_run_with_output(prompt_id, data.get('output'))
-
-
-class Status(Enum):
-    NOT_STARTED = "not-started"
-    RUNNING = "running"
-    SUCCESS = "success"
-    FAILED = "failed"
-    UPLOADING = "uploading"
-
-# Global variable to keep track of the last read line number
-last_read_line_number = 0
-
-async def update_run_live_status(prompt_id, live_status, calculated_progress: float):
-    if prompt_id not in prompt_metadata:
-        return
-    
-    print("progress", calculated_progress)
-    
-    status_endpoint = prompt_metadata[prompt_id]['status_endpoint']
-    body = {
-        "run_id": prompt_id,
-        "live_status": live_status,
-        "progress": calculated_progress
-    }
-    # requests.post(status_endpoint, json=body)
-    async with aiohttp.ClientSession() as session:
-        async with session.post(status_endpoint, json=body) as response:
+        if overwrite is not None and (overwrite == "true" or overwrite == "1"):
             pass
-
-
-def update_run(prompt_id, status: Status):
-    global last_read_line_number
-
-    if prompt_id not in prompt_metadata:
-        return
-
-    if ('status' not in prompt_metadata[prompt_id] or prompt_metadata[prompt_id]['status'] != status):
-
-        # when the status is already failed, we don't want to update it to success
-        if ('status' in prompt_metadata[prompt_id] and prompt_metadata[prompt_id]['status'] == Status.FAILED):
-            return
-
-        status_endpoint = prompt_metadata[prompt_id]['status_endpoint']
-        body = {
-            "run_id": prompt_id,
-            "status": status.value,
-        }
-        print(f"Status: {status.value}")
-
-        try:
-            requests.post(status_endpoint, json=body)
-
-            if cd_enable_run_log and (status == Status.SUCCESS or status == Status.FAILED):
-                try:
-                    with open(comfyui_file_path, 'r') as log_file:
-                        # log_data = log_file.read()
-                        # Move to the last read line
-                        all_log_data = log_file.read()  # Read all log data
-                        print("All log data before skipping:", all_log_data)  # Log all data before skipping
-                        log_file.seek(0)  # Reset file pointer to the beginning
-                        
-                        for _ in range(last_read_line_number):
-                            next(log_file)
-                        log_data = log_file.read()
-                        # Update the last read line number
-                        last_read_line_number += log_data.count('\n')
-                        print("last_read_line_number", last_read_line_number)
-                        print("log_data", log_data)
-                        print("log_data.count(n)", log_data.count('\n'))
-
-                        body = {
-                            "run_id": prompt_id,
-                            "log_data": [
-                                {
-                                    "logs": log_data,
-                                    # "timestamp": time.time(),
-                                }
-                            ]
-                        }
-                        requests.post(status_endpoint, json=body)
-                except Exception as log_error:
-                    print(f"Error reading log file: {log_error}")
-                
-
-        except Exception as e:
-            error_type = type(e).__name__
-            stack_trace = traceback.format_exc().strip()
-            print(f"Error occurred while updating run: {e} {stack_trace}")
-        finally:
-            prompt_metadata[prompt_id]['status'] = status
-            
-
-async def upload_file(prompt_id, filename, subfolder=None, content_type="image/png", type="output"):
-    """
-    Uploads file to S3 bucket using S3 client object
-    :return: None
-    """
-    filename,output_dir = folder_paths.annotated_filepath(filename)
-
-    # validation for security: prevent accessing arbitrary path
-    if filename[0] == '/' or '..' in filename:
-        return
-
-    if output_dir is None:
-        output_dir = folder_paths.get_directory_by_type(type)
-
-    if output_dir is None:
-        print(filename, "Upload failed: output_dir is None")
-        return 
-
-    if subfolder != None:
-        full_output_dir = os.path.join(output_dir, subfolder)
-        if os.path.commonpath((os.path.abspath(full_output_dir), output_dir)) != output_dir:
-            return
-        output_dir = full_output_dir
-
-    filename = os.path.basename(filename)
-    file = os.path.join(output_dir, filename)
-
-    print("uploading file", file)
-
-    file_upload_endpoint = prompt_metadata[prompt_id]['file_upload_endpoint']
-
-    filename = quote(filename)
-    prompt_id = quote(prompt_id)
-    content_type = quote(content_type)
-
-    target_url = f"{file_upload_endpoint}?file_name={filename}&run_id={prompt_id}&type={content_type}"
-
-    result = requests.get(target_url)
-    ok = result.json()
-    
-    with open(file, 'rb') as f:
-        data = f.read()
-        headers = {
-            "x-amz-acl": "public-read",
-            "Content-Type": content_type,
-            "Content-Length": str(len(data)),
-        }
-        response = requests.put(ok.get("url"), headers=headers, data=data)
-        async with aiohttp.ClientSession() as session:
-            async with session.put(ok.get("url"), headers=headers, data=data) as response:
-                print("upload file response", response.status)
-
-def have_pending_upload(prompt_id):
-    if 'prompt_id' in prompt_metadata and 'uploading_nodes' in prompt_metadata[prompt_id] and len(prompt_metadata[prompt_id]['uploading_nodes']) > 0:
-        print("have pending upload ", len(prompt_metadata[prompt_id]['uploading_nodes']))
-        return True
-
-    print("no pending upload")
-    return False
-
-def mark_prompt_done(prompt_id):
-    if prompt_id in prompt_metadata:
-        prompt_metadata[prompt_id]["done"] = True
-        print("Prompt done")
-
-def is_prompt_done(prompt_id):
-    if prompt_id in prompt_metadata and "done" in prompt_metadata[prompt_id]:
-        if prompt_metadata[prompt_id]["done"] == True:
-            return True
-    
-    return False
-
-# Use to handle upload error and send back to ComfyDeploy
-async def handle_error(prompt_id, data, e: Exception):
-    error_type = type(e).__name__
-    stack_trace = traceback.format_exc().strip()
-    body = {
-        "run_id": prompt_id,
-        "output_data": {
-            "error": {
-                "type": error_type,
-                "message": str(e),
-                "stack_trace": stack_trace
-            }
-        }
-    }
-    await update_file_status(prompt_id, data, False, have_error=True)
-    print(body)
-    print(f"Error occurred while uploading file: {e}")
-
-# Mark the current prompt requires upload, and block it from being marked as success
-async def update_file_status(prompt_id, data, uploading, have_error=False, node_id=None):
-    if 'uploading_nodes' not in prompt_metadata[prompt_id]:
-        prompt_metadata[prompt_id]['uploading_nodes'] = set()
-
-    if node_id is not None:
-        if uploading:
-            prompt_metadata[prompt_id]['uploading_nodes'].add(node_id)
         else:
-            prompt_metadata[prompt_id]['uploading_nodes'].discard(node_id)
+            i = 1
+            while os.path.exists(filepath):
+                filename = f"{split[0]} ({i}){split[1]}"
+                filepath = os.path.join(full_output_folder, filename)
+                i += 1
 
-    print(prompt_metadata[prompt_id]['uploading_nodes'])
-    # Update the remote status
+        with open(filepath, "wb") as f:
+            f.write(image.get('file'))
 
-    if have_error:
-        update_run(prompt_id, Status.FAILED)
-        await send("failed", {
-            "prompt_id": prompt_id,
-        })
-        return
-
-    # if there are still nodes that are uploading, then we set the status to uploading
-    if uploading:
-        if prompt_metadata[prompt_id]['status'] != Status.UPLOADING:
-            update_run(prompt_id, Status.UPLOADING)
-            await send("uploading", {
-                "prompt_id": prompt_id,
-            })
-    
-    # if there are no nodes that are uploading, then we set the status to success
-    elif not uploading and not have_pending_upload(prompt_id) and is_prompt_done(prompt_id=prompt_id):
-        update_run(prompt_id, Status.SUCCESS)
-        print("Status: SUCCUSS")
-        await send("success", {
-            "prompt_id": prompt_id,
-        })
-
-async def handle_upload(prompt_id, data, key, content_type_key, default_content_type):
-    items = data.get(key, [])
-    for item in items:
-        await upload_file(
-            prompt_id, 
-            item.get("filename"), 
-            subfolder=item.get("subfolder"), 
-            type=item.get("type"), 
-            content_type=item.get(content_type_key, default_content_type)
-        )
-
-
-# Upload files in the background
-async def upload_in_background(prompt_id, data, node_id=None, have_upload=True):
-    try:
-        await handle_upload(prompt_id, data, 'images', "content_type", "image/png")
-        await handle_upload(prompt_id, data, 'files', "content_type", "image/png")
-        # This will also be mp4
-        await handle_upload(prompt_id, data, 'gifs', "format", "image/gif")
-            
-        if have_upload:
-            await update_file_status(prompt_id, data, False, node_id=node_id)
-    except Exception as e:
-        await handle_error(prompt_id, data, e)
-
-async def update_run_with_output(prompt_id, data, node_id=None):
-    if prompt_id in prompt_metadata:
-        status_endpoint = prompt_metadata[prompt_id]['status_endpoint']
-
-        body = {
-            "run_id": prompt_id,
-            "output_data": data
-        }
-
-        try:
-            have_upload = 'images' in data or 'files' in data or 'gifs' in data
-            print("\nhave_upload", have_upload, node_id)
-
-            if have_upload:
-                await update_file_status(prompt_id, data, True, node_id=node_id)
-
-            asyncio.create_task(upload_in_background(prompt_id, data, node_id=node_id, have_upload=have_upload))
-
-        except Exception as e:
-            await handle_error(prompt_id, data, e)
-            
-
-        requests.post(status_endpoint, json=body)
-
-        await send('outputs_uploaded', {
-            "prompt_id": prompt_id
-        })
-
-prompt_server.send_json_original = prompt_server.send_json
-prompt_server.send_json = send_json_override.__get__(prompt_server, server.PromptServer)
-
-root_path = os.path.dirname(os.path.abspath(__file__))
-two_dirs_up = os.path.dirname(os.path.dirname(root_path))
-log_file_path = os.path.join(two_dirs_up, 'comfy-deploy.log')
-comfyui_file_path = os.path.join(two_dirs_up, 'comfyui.log')
-
-last_read_line = 0
-
-async def watch_file_changes(file_path, callback):
-    global last_read_line
-    last_modified_time = os.stat(file_path).st_mtime
-    while True:
-        time.sleep(1)  # sleep for a while to reduce CPU usage
-        modified_time = os.stat(file_path).st_mtime
-        if modified_time != last_modified_time:
-            last_modified_time = modified_time
-            with open(file_path, 'r') as file:
-                lines = file.readlines()
-            if last_read_line > len(lines):
-                last_read_line = 0  # Reset if log file has been rotated
-            new_lines = lines[last_read_line:]
-            last_read_line = len(lines)
-            if new_lines:
-                await callback(''.join(new_lines))
-
-
-async def send_first_time_log(sid):
-    with open(log_file_path, 'r') as file:
-        lines = file.readlines()
-    await send("LOGS", ''.join(lines), sid)
-
-async def send_logs_to_websocket(logs):
-    await send("LOGS", logs)
-
-def start_loop(loop):
-    asyncio.set_event_loop(loop)
-    loop.run_forever()
-
-def run_in_new_thread(coroutine):
-    new_loop = asyncio.new_event_loop()
-    t = threading.Thread(target=start_loop, args=(new_loop,), daemon=True)
-    t.start()
-    asyncio.run_coroutine_threadsafe(coroutine, new_loop)
-
-if cd_enable_log:
-    run_in_new_thread(watch_file_changes(log_file_path, send_logs_to_websocket))
+        return {"name" : filename, "subfolder": subfolder, "type": image_upload_type}
+    else:
+        raise 'no image and/or file'
