@@ -1,10 +1,10 @@
 import { app } from "./app.js";
 import { api } from "./api.js";
 
-console.log("STARTING")
 app.registerExtension({
-    name: "ComfyDeploy.CloudDevices",
+    name: "CLOUDGE.comfydeploy",
     async setup() {
+        console.log("STARTING")
         const menu = document.querySelector(".comfy-menu");
         const urlParams = new URLSearchParams(window.location.search);
         const machineId = urlParams.get('machine_id');
@@ -13,7 +13,7 @@ app.registerExtension({
             // || 
             // !token
         ) {
-            console.error("Machine ID and token are required to provision a GPU."); // Log error if missing required parameters
+            console.log("Machine ID and token are required to provision a GPU."); // Log error if missing required parameters
             return;
         }
         api.machineId = machineId;
@@ -98,3 +98,5 @@ app.registerExtension({
         }.bind(api);
     },
 });
+
+console.log("is this being touched")
