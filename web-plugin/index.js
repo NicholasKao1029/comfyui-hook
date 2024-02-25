@@ -5,27 +5,11 @@ app.registerExtension({
     name: "ComfyUICloud.CloudDevices",
     async setup() {
         const menu = document.querySelector(".comfy-menu");
-        // console.log(menu)
-        // const queueButton = document.querySelector(".comfy-queue-btn");
-        // queueButton.textContent = 'blah'
-        // queueButton.onclick = () => {
-
-        // }
-        // console.log(queueButton)
         const separator = document.createElement("hr");
 
         separator.style.margin = "20px 0";
         separator.style.width = "100%";
         menu.append(separator);
-
-        // Create a dropdown for selecting the device: CPU, A10G, A100
-        const deviceSelectDropdown = document.createElement("select");
-        deviceSelectDropdown.style.margin = "0 10px";
-        deviceSelectDropdown.style.padding = "5px 10px";
-        deviceSelectDropdown.style.borderRadius = "5px";
-        deviceSelectDropdown.style.border = "1px solid #ccc";
-        deviceSelectDropdown.style.background = "white";
-        deviceSelectDropdown.style.color = "black";
 
         // Add the options
         const options = [
@@ -129,85 +113,6 @@ app.registerExtension({
         // Update the device status every 5 seconds
         setInterval(updateDeviceStatus, 5_000);
 
-        // Add the dropdown to the menu
-        menu.append(deviceSelectDropdown);
-
-        // Create a dropdown for selecting the max idle timeout: 2 mins, 5 mins, 10 mins, 15 mins
-        // below the device dropdown, add a small description for what the max idle timeout is
-        // when the user selects a new value, send a POST request to the server  to update the max idle timeout (POST /update_max_idle_time with body { max_idle_secs: <new value in secs> })
-
-        const maxIdleTimeoutDropdown = document.createElement("select");
-        maxIdleTimeoutDropdown.style.margin = "10px 10px";
-        maxIdleTimeoutDropdown.style.padding = "5px 10px";
-        maxIdleTimeoutDropdown.style.borderRadius = "5px";
-        maxIdleTimeoutDropdown.style.border = "1px solid #ccc";
-        maxIdleTimeoutDropdown.style.background = "white";
-        maxIdleTimeoutDropdown.style.color = "black";
-
-        // Add the options
-        const maxIdleTimeoutOptions = [
-            { name: "Max GPU idle: 2 mins", value: 120 },
-            { name: "Max GPU idle: 5 mins", value: 300 },
-            { name: "Max GPU idle: 10 mins", value: 600 },
-            { name: "Max GPU idle: 15 mins", value: 900 },
-        ];
-
-        for (const option of maxIdleTimeoutOptions) {
-            const optionElement = document.createElement("option");
-            optionElement.value = option.value;
-            optionElement.textContent = option.name;
-            maxIdleTimeoutDropdown.append(optionElement);
-        }
-
-        // Set the default value
-        maxIdleTimeoutDropdown.value = 300;
-
-        // Add the event listener
-        maxIdleTimeoutDropdown.addEventListener("change", async () => {
-            const max_idle_secs = maxIdleTimeoutDropdown.value;
-            
-            // Send the request to the server
-            await api.fetchApi("/update_max_idle_time", {
-                method: "POST",
-                body: JSON.stringify({ max_idle_secs }),
-                headers: {
-                    "Content-Type": "application/json",
-                },
-            });
-        });
-
-        // Add the dropdown to the menu
-        menu.append(maxIdleTimeoutDropdown);
-
-        api.queuePrompt = async function(number, { output, workflow }) {
-            const body = {
-                client_id: this.clientId,
-                prompt: output,
-                extra_data: { extra_pnginfo: { workflow } },
-            };
-        
-            if (number === -1) {
-                body.front = true;
-            } else if (number != 0) {
-                body.number = number;
-            }
-        
-            const res = await this.fetchApi("/custom-prompt", {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/json",
-                },
-                body: JSON.stringify(body),
-            });
-        
-            if (res.status !== 200) {
-                throw {
-                    response: await res.json(),
-                };
-            }
-        
-            return await res.json();
-        }.bind(api);
 
 
         // // create a paragraph element with a description of what the max idle timeout is
@@ -225,3 +130,34 @@ app.registerExtension({
         // menu.append(maxIdleTimeoutDescription);
     },
 });
+
+
+api.queuePrompt = async function(number, { output, workflow }) {
+    const body = {
+        client_id: this.clientId,
+        prompt: output,
+        extra_data: { extra_pnginfo: { workflow } },
+    };
+
+    if (number === -1) {
+        body.front = true;
+    } else if (number != 0) {
+        body.number = number;
+    }
+
+    const res = await this.fetchApi("/custom-prompt", {
+        method: "POST",
+        headers: {
+            "Content-Type": "application/json",
+        },
+        body: JSON.stringify(body),
+    });
+
+    if (res.status !== 200) {
+        throw {
+            response: await res.json(),
+        };
+    }
+
+    return await res.json();
+}.bind(api);
