@@ -12,16 +12,20 @@ gpu_remote_url = None
 gpu_state = "offline"
 
 # Async HTTP session for external API calls
-async def fetch_gpu_info(machine_id):
+async def fetch_gpu_info(machine_id, token):
     # Directly return test data if in test mode
     if TEST_MODE:
         print('Test mode is enabled, resolving to localhost:8189')
-        return {'url': 'http://localhost:8189', 'gpu': 'local'}
+        return {'url': 'http://localhost:8189'}
     
     print('Attempting to fetch')
     async with ClientSession() as session:
         try:
-            async with session.post(f"{COMFY_DEPLOY_URL}/api/machine-tunnel", data={"machine_id": machine_id}) as response:
+            async with session.post(f"{COMFY_DEPLOY_URL}/api/machine-endpoint", 
+            json={
+                "machine_id": machine_id,
+                "type": "gpu",
+            }, headers={"Authorization": f"Bearer {token}"}) as response:
                 print("Response status:", response.status)
                 if response.status == 200:
                     data = await response.json()
@@ -37,12 +41,14 @@ async def provision_gpu(request):
     print("Provisioning GPU...")
     params = await request.json()
     machine_id = params.get('machine_id')
-    if not machine_id:
-        return web.Response(text=json.dumps({"error": "Machine ID is required."}), status=400, content_type='application/json')
+    token = params.get('token')
+    if not machine_id or not token:
+        return web.Response(text=json.dumps({"error": "Machine ID and token is required."}), status=400, content_type='application/json')
 
     # Update state to reflect the GPU provisioning process has started
     gpu_state = "started"
-    data = await fetch_gpu_info(machine_id)
+    data = await fetch_gpu_info(machine_id, token)
+    print(data)
     if "url" in data:
         gpu_remote_url = data["url"]
         gpu_state = "online"
@@ -54,18 +60,28 @@ async def provision_gpu(request):
 @server.PromptServer.instance.routes.get("/worker_status")
 async def get_dedicated_worker_info(request):
     global gpu_remote_url, gpu_state
+    max_retries = 3
+    attempts = 0
+
     if gpu_remote_url:
-        # Attempt to ping the GPU worker to check its status
-        async with ClientSession() as session:
+        while attempts < max_retries:
             try:
-                async with session.get(f"{gpu_remote_url}/prompt") as response:
-                    if response.status == 200:
-                        gpu_state = "online"
-                    else:
-                        gpu_state = "offline"
-            except:
-                gpu_state = "offline"
+                async with ClientSession() as session:
+                    async with session.get(f"{gpu_remote_url}/prompt") as response:
+                        if response.status == 200:
+                            gpu_state = "online"
+                            break
+                        else:
+                            attempts += 1
+                            if attempts == max_retries:
+                                gpu_state = "offline"
+                                gpu_remote_url = None
+            except Exception as e:
+                attempts += 1
+                if attempts == max_retries:
+                    gpu_state = "offline"
+                    gpu_remote_url = None
     else:
         gpu_state = "offline"
 
-    return web.Response(text=json.dumps({"state": gpu_state, "url": gpu_remote_url or None}), status=200, content_type='application/json')
+    return web.Response(text=json.dumps({"state": gpu_state, "url": gpu_remote_url}), status=200, content_type='application/json')

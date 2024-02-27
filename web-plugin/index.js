@@ -4,10 +4,10 @@ import { api } from "./api.js";
 app.registerExtension({
     name: "CLOUDGE.comfydeploy",
     async setup() {
-        console.log("STARTING")
         const menu = document.querySelector(".comfy-menu");
         const urlParams = new URLSearchParams(window.location.search);
         const machineId = urlParams.get('machine_id');
+        const token = urlParams.get('auth_token');
         
         if (!machineId 
             // || 
@@ -17,16 +17,23 @@ app.registerExtension({
             return;
         }
         api.machineId = machineId;
-        console.log(`Machine ID: ${machineId}, Token: ${token}`); // Log the machine ID and token
 
-        // Display element for GPU status
         const gpuStatusDisplay = document.createElement("div");
         gpuStatusDisplay.textContent = "GPU Status: Checking...";
         menu.appendChild(gpuStatusDisplay);
 
+        const deconstructUrl = (url) => {
+            const _url = new URL(url);
+            return {
+                api_protocol : _url.protocol,
+                api_host: _url.host,
+                api_base: _url.pathname.split('/').slice(0, -1).join('/'),
+                api_query_params: _url.search,
+            }
+        }
+
         // Function to provision a GPU
         const provisionGPU = async (machineId) => {
-            console.log("Provisioning GPU..."); // Log the provisioning process
             gpuStatusDisplay.textContent = "GPU Status: Provisioning...";
             try {
                 // do regular fetch to contact local server
@@ -37,9 +44,11 @@ app.registerExtension({
                 });
                 const data = await response.json();
                 if (response.ok && data.url) {
-                    // NOTE: set here
-                    api.api_host  = data.url;
-                    api.api_base = new URL(data.url).pathname.split('/').slice(0, -1).join('/');
+                    const {api_host, api_base, api_query_params, protocol } = deconstructUrl(data.url)
+                    api.api_host = api_host;
+                    api.api_base = api_base;
+                    api.api_query_params = api_query_params;
+                    api.protocol = protocol;
                     this.remoteConfigured = true;
                     gpuStatusDisplay.textContent = "GPU Status: Online";
                 } else {
@@ -52,19 +61,18 @@ app.registerExtension({
 
         // Function to update the GPU status display
         const updateGpuStatus = async () => {
-            console.log("Updating GPU status..."); // Log the status update process
             gpuStatusDisplay.textContent = "GPU Status: Checking...";
             try {
                 // do regular fetch to contact local server
                 const response = await fetch("/worker_status", { method: "GET" });
-                const { state, url } = await response.json();
+                const { state } = await response.json();
                 gpuStatusDisplay.textContent = `GPU Status: ${state}`;
-                console.log(`GPU Status updated: ${state}`); // Log the updated status
-                if (state === "online" && url) {
-                    api.api_base = url;
+                if (state === "online") {
                     api.remoteConfigured = true;
                 } else {
                     api.remoteConfigured = false;
+                    api.socket = null;
+                    api.init(); // revalidate ws connection
                 }
             } catch (error) {
                 console.error("Error fetching GPU status:", error);
@@ -74,15 +82,25 @@ app.registerExtension({
         // Periodically update the GPU status
         setInterval(updateGpuStatus, 5000);
 
-        // const originalApiUrl = api.apiUrl;
-        // api.apiUrl = function (route) {
-        //     console.log("apiurl", this.remoteConfigured)
-        //     if (this.remoteConfigured) {
-        //         return this.api_host + this.api_base + route;
-        //     } else {
-        //         return originalApiUrl.call(this, route);
-        //     }
-        // }
+        const originalApiUrl = api.apiURL;
+        api.apiURL = function (route) {
+            if (this.remoteConfigured) {
+                return `${this.protocol}//${this.api_host}${this.api_base + route}`
+            }
+            return originalApiUrl.call(this, route);
+        }
+
+        // re-writing because comfy-user breaks cors
+        api.fetchApi = function (route, options) {
+            console.log("fetching")
+            if (!options) {
+                options = {};
+            }
+            if (!options.headers) {
+                options.headers = {};
+            }
+            return fetch(this.apiURL(route), options);
+        }
 
         const originalQueuePrompt = api.queuePrompt;
         api.queuePrompt = async function(number, { output, workflow }) {
@@ -98,5 +116,3 @@ app.registerExtension({
         }.bind(api);
     },
 });
-
-console.log("is this being touched")
