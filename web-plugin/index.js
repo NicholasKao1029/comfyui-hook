@@ -25,7 +25,6 @@ app.registerExtension({
         const deconstructUrl = (url) => {
             const _url = new URL(url);
             return {
-                api_protocol : _url.protocol,
                 api_host: _url.host,
                 api_base: _url.pathname.split('/').slice(0, -1).join('/'),
                 api_query_params: _url.search,
@@ -44,11 +43,10 @@ app.registerExtension({
                 });
                 const data = await response.json();
                 if (response.ok && data.url) {
-                    const {api_host, api_base, api_query_params, protocol } = deconstructUrl(data.url)
+                    const {api_host, api_base, api_query_params } = deconstructUrl(data.url)
                     api.api_host = api_host;
                     api.api_base = api_base;
                     api.api_query_params = api_query_params;
-                    api.protocol = protocol;
                     this.remoteConfigured = true;
                     gpuStatusDisplay.textContent = "GPU Status: Online";
                 } else {
@@ -85,12 +83,14 @@ app.registerExtension({
         const originalApiUrl = api.apiURL;
         api.apiURL = function (route) {
             if (this.remoteConfigured) {
-                return `${this.protocol}//${this.api_host}${this.api_base + route}`
+                console.log("remote configured", route)
+                console.log( `${window.location.protocol}//${this.api_host}${this.api_base + route}`)
+                return `${window.location.protocol}//${this.api_host}${this.api_base + route}`
             }
             return originalApiUrl.call(this, route);
         }
 
-        // re-writing because comfy-user breaks cors
+        // re-writing because comfy-user in headers breaks cors
         api.fetchApi = function (route, options) {
             console.log("fetching")
             if (!options) {
