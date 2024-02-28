@@ -7,6 +7,7 @@ import json
 COMFY_DEPLOY_URL = os.environ.get('COMFY_DEPLOY_URL', 'http://localhost:3000')
 print("COMFY_DEPLOY_URL:", COMFY_DEPLOY_URL)
 TEST_MODE = os.environ.get('TEST_MODE', 'true').lower() == 'true'  # Check if test mode is enabled # TODO: update this
+# this is for testing
 GPU_PORT_TOGGLE = os.environ.get('GPU_PORT_TOGGLE', 'true').lower() == 'true'
 
 # Global state variables
