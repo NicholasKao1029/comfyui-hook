@@ -1,41 +1,83 @@
 import { app } from "./app.js";
 import { api } from "./api.js";
 
+
+const deconstructUrl = (url) => {
+    const _url = new URL(url);
+    return {
+        api_host: _url.host,
+        api_base: _url.pathname.split('/').slice(0, -1).join('/'),
+        api_query_params: _url.search,
+    }
+}
+
 app.registerExtension({
     name: "CLOUDGE.comfydeploy",
     async setup() {
+        console.log("setting up comfydeploy cloud")
         const menu = document.querySelector(".comfy-menu");
         const urlParams = new URLSearchParams(window.location.search);
         const machineId = urlParams.get('machine_id');
         const token = urlParams.get('auth_token');
         
-        if (!machineId 
-            // || 
-            // !token
-        ) {
-            console.log("Machine ID and token are required to provision a GPU."); // Log error if missing required parameters
+        if (!(machineId && token)) {
+            console.log("Machine ID and token are required to provision a GPU.");
             return;
         }
-        api.machineId = machineId;
 
-        const gpuStatusDisplay = document.createElement("div");
-        gpuStatusDisplay.textContent = "GPU Status: Checking...";
-        menu.appendChild(gpuStatusDisplay);
+        const messageContainer = document.createElement("div");
+        messageContainer.style.display = "flex";
+        messageContainer.style.alignItems = "center";
+        messageContainer.style.margin = "10px 10px";
+        messageContainer.style.padding = "5px 10px";
+        messageContainer.style.borderRadius = "5px";
+        messageContainer.style.border = "1px solid #ccc";
+        messageContainer.style.background = "white";
+        messageContainer.style.color = "black";
 
-        const deconstructUrl = (url) => {
-            const _url = new URL(url);
-            return {
-                api_host: _url.host,
-                api_base: _url.pathname.split('/').slice(0, -1).join('/'),
-                api_query_params: _url.search,
+        const statusIndicator = document.createElement("div");
+        statusIndicator.style.width = "10px";
+        statusIndicator.style.height = "10px";
+        statusIndicator.style.borderRadius = "50%";
+        statusIndicator.style.marginRight = "10px";
+        statusIndicator.style.background = "grey";
+        messageContainer.append(statusIndicator);
+
+        const messageText = document.createElement("span");
+        messageText.textContent = "GPU: offline";
+        messageContainer.append(messageText);
+
+        const setGpuStatusLight = (status) => {
+            if (status === "online") {
+                statusIndicator.style.background = "green";
+            } else if (status === "offline") {
+                statusIndicator.style.background = "grey";
+            } else if (status === "provisioning") {
+                statusIndicator.style.background = "yellow";
             }
-        }
+        };
+
+        api.machineId = machineId;
+        // set aspect ratio to square
+        menu.appendChild(messageContainer);
+
+        const cleanUp = () => {
+            // clean up connections
+            api.api_host = location.host;
+            api.api_base = location.pathname.split('/').slice(0, -1).join('/');
+            // turn off 
+            api.remoteConfigured = false;
+            api.socket = null; // Assuming socket cleanup is required
+            setGpuStatusLight("offline")
+        };
 
         // Function to provision a GPU
         const provisionGPU = async (machineId) => {
-            gpuStatusDisplay.textContent = "GPU Status: Provisioning...";
+            setGpuStatusLight("provisioning");
+            messageText.textContent = "GPU Status: Provisioning...";
             try {
                 // do regular fetch to contact local server
+                console.log('requesting gpu')
                 const response = await fetch("/provision_gpu", {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
@@ -47,44 +89,48 @@ app.registerExtension({
                     api.api_host = api_host;
                     api.api_base = api_base;
                     api.api_query_params = api_query_params;
-                    this.remoteConfigured = true;
-                    gpuStatusDisplay.textContent = "GPU Status: Online";
+                    api.remoteConfigured = true;
+                    messageText.textContent = "GPU Status: Online";
+                    setGpuStatusLight("online")
+                    console.log('set gpu')
                 } else {
+                    app.ui.dialog.show("Failed to provision GPU");
                     throw new Error(data.error || "Failed to provision GPU");
                 }
             } catch (error) {
-                console.error("GPU Provisioning Error:", error);
+                setGpuStatusLight("offline")
+                app.ui.dialog.show("GPU Provisioning Error:", error);
+                throw new Error("Failed to provision GPU");
             }
         };
 
-        // Function to update the GPU status display
         const updateGpuStatus = async () => {
-            gpuStatusDisplay.textContent = "GPU Status: Checking...";
+            messageText.textContent = "GPU Status: Checking...";
             try {
-                // do regular fetch to contact local server
                 const response = await fetch("/worker_status", { method: "GET" });
                 const { state } = await response.json();
-                gpuStatusDisplay.textContent = `GPU Status: ${state}`;
+                messageText.textContent = `GPU Status: ${state}`;
                 if (state === "online") {
+                    setGpuStatusLight("online");
+                    if (!api.remoteConfigured) {
+                        api.init();
+                    }
                     api.remoteConfigured = true;
                 } else {
-                    api.remoteConfigured = false;
-                    api.socket = null;
-                    api.init(); // revalidate ws connection
+                    setGpuStatusLight("offline");
+                    cleanUp(); 
                 }
             } catch (error) {
                 console.error("Error fetching GPU status:", error);
+                cleanUp(); // Attempt to cleanup and re-provision on error
             }
         };
-
-        // Periodically update the GPU status
+        // poll the GPU status
         setInterval(updateGpuStatus, 5000);
 
         const originalApiUrl = api.apiURL;
         api.apiURL = function (route) {
             if (this.remoteConfigured) {
-                console.log("remote configured", route)
-                console.log( `${window.location.protocol}//${this.api_host}${this.api_base + route}`)
                 return `${window.location.protocol}//${this.api_host}${this.api_base + route}`
             }
             return originalApiUrl.call(this, route);
@@ -104,15 +150,24 @@ app.registerExtension({
 
         const originalQueuePrompt = api.queuePrompt;
         api.queuePrompt = async function(number, { output, workflow }) {
-            if (!this.remoteConfigured) {
-                console.log("GPU not configured. Provisioning..."); // Log the provisioning necessity
-                await provisionGPU(this.machineId);
-                this.remoteConfigured = true; // Mark the remote URL as configured
-                this.socket = null; // potentially use the 'close' event to close socket instead
-                this.init(); // Reinitialize connections to point to the new remote
-                console.log("GPU provisioning and configuration completed."); // Log completion
+            try {
+                if (!this.remoteConfigured) {
+                    console.log("GPU not configured. Provisioning..."); // Log the provisioning necessity
+                    cleanUp();
+                    await provisionGPU(this.machineId);
+                    console.log('finished provisioning');
+                    this.init(); 
+                }
+                if (this.remoteConfigured) {
+                    return await originalQueuePrompt.call(this, number, { output, workflow });
+                }
+                throw new Error("Remote GPU not configured");
+            } catch (error) {
+                console.error("Error during queuePrompt:", error);
+                cleanUp(); // Reset state and clean up connections
+                this.init();
+                // app.ui.dialog.show("Remote GPU has timed out. Increase timeout limit for your machine or try again");
             }
-            return originalQueuePrompt.call(this, number, { output, workflow });
         }.bind(api);
     },
 });

@@ -7,17 +7,26 @@ import json
 COMFY_DEPLOY_URL = os.environ.get('COMFY_DEPLOY_URL', 'http://localhost:3000')
 print("COMFY_DEPLOY_URL:", COMFY_DEPLOY_URL)
 TEST_MODE = os.environ.get('TEST_MODE', 'true').lower() == 'true'  # Check if test mode is enabled # TODO: update this
+GPU_PORT_TOGGLE = os.environ.get('GPU_PORT_TOGGLE', 'true').lower() == 'true'
 
 # Global state variables
 gpu_remote_url = None
 gpu_state = "offline"
+last_gpu_port = 8189
 
 # Async HTTP session for external API calls
 async def fetch_gpu_info(machine_id, token):
     # Directly return test data if in test mode
+    global last_gpu_port
     if TEST_MODE:
+        if GPU_PORT_TOGGLE:
+            # Toggle the port based on the last one used
+            if last_gpu_port == 8189:
+                last_gpu_port = 8190 
+            else: 
+                last_gpu_port = 8189
         print('Test mode is enabled, resolving to localhost:8189')
-        return {'url': 'http://localhost:8189'}
+        return {'url': f'http://localhost:{last_gpu_port}'}
     
     print('Attempting to fetch')
     async with ClientSession() as session:
