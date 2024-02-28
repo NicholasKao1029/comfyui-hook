@@ -2,18 +2,24 @@ import server
 from aiohttp import web, ClientSession
 import os
 import json
+import asyncio
+import signal
+import time
 
 # Environment configuration
 COMFY_DEPLOY_URL = os.environ.get('COMFY_DEPLOY_URL', 'http://localhost:3000')
-print("COMFY_DEPLOY_URL:", COMFY_DEPLOY_URL)
-TEST_MODE = os.environ.get('TEST_MODE', 'true').lower() == 'true'  # Check if test mode is enabled # TODO: update this
-# this is for testing
-GPU_PORT_TOGGLE = os.environ.get('GPU_PORT_TOGGLE', 'true').lower() == 'true'
+IDLE_TIMEOUT_SEC = int(os.environ.get('IDLE_TIMEOUT_SEC', 15*60)) 
+TIMEOUT_ON_IDLE = os.environ.get('TIMEOUT_ON_IDLE', 'false').lower() == 'true'
 
+TEST_MODE = os.environ.get('TEST_MODE', 'true').lower() == 'true'  # Check if test mode is enabled # TODO: update this
+
+GPU_PORT_TOGGLE = True
 # Global state variables
 gpu_remote_url = None
 gpu_state = "offline"
 last_gpu_port = 8189
+shutdown_event = asyncio.Event()
+last_heartbeat = time.time()
 
 # Async HTTP session for external API calls
 async def fetch_gpu_info(machine_id, token):
@@ -96,3 +102,23 @@ async def get_dedicated_worker_info(request):
         gpu_state = "offline"
 
     return web.Response(text=json.dumps({"state": gpu_state, "url": gpu_remote_url}), status=200, content_type='application/json')
+
+
+@server.PromptServer.instance.routes.get("/comfydeploy-heartbeat")
+async def handle_heartbeat(request):
+    global last_heartbeat
+    print("extending heartbeat")
+    last_heartbeat = time.time()
+    return web.Response(text="Heartbeat received")
+
+async def check_inactivity():
+    global last_heartbeat
+    while True:
+        print("checking for inactivity")
+        await asyncio.sleep(10)  # Check every 10 seconds
+        if time.time() - last_heartbeat > IDLE_TIMEOUT_SEC:
+            print('Shutting down due to inactivity.')
+            os._exit(1) 
+
+if TIMEOUT_ON_IDLE:
+    server.PromptServer.instance.loop.create_task(check_inactivity())
