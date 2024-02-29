@@ -27,7 +27,7 @@ async def fetch_gpu_info(machine_id, token):
     global last_gpu_port
     if TEST_MODE:
         if GPU_PORT_TOGGLE:
-            time.sleep(5) # mock endpoint creation time
+            time.sleep(12) # mock endpoint creation time
             if last_gpu_port == 8189:
                 last_gpu_port = 8190 
             else: 
@@ -98,8 +98,6 @@ async def get_dedicated_worker_info(request):
                 if attempts == max_retries:
                     gpu_state = "offline"
                     gpu_remote_url = None
-    else:
-        gpu_state = "offline"
 
     return web.Response(text=json.dumps({"state": gpu_state, "url": gpu_remote_url}), status=200, content_type='application/json')
 
