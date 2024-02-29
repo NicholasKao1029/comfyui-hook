@@ -53,7 +53,7 @@ app.registerExtension({
             } else if (status === "offline") {
                 statusIndicator.style.background = "grey";
             } else if (status === "provisioning") {
-                statusIndicator.style.background = "yellow";
+                statusIndicator.style.background = "blue";
             }
         };
 
@@ -116,7 +116,11 @@ app.registerExtension({
                         api.init();
                     }
                     api.remoteConfigured = true;
-                } else {
+                }
+                else if (state === "provisioning") {
+                    setGpuStatusLight("provisioning");
+                }
+                else {
                     setGpuStatusLight("offline");
                     cleanUp(); 
                 }

@@ -27,7 +27,7 @@ async def fetch_gpu_info(machine_id, token):
     global last_gpu_port
     if TEST_MODE:
         if GPU_PORT_TOGGLE:
-            # Toggle the port based on the last one used
+            time.sleep(5) # mock endpoint creation time
             if last_gpu_port == 8189:
                 last_gpu_port = 8190 
             else: 
@@ -63,7 +63,7 @@ async def provision_gpu(request):
         return web.Response(text=json.dumps({"error": "Machine ID and token is required."}), status=400, content_type='application/json')
 
     # Update state to reflect the GPU provisioning process has started
-    gpu_state = "started"
+    gpu_state = "provisioning"
     data = await fetch_gpu_info(machine_id, token)
     print(data)
     if "url" in data:
