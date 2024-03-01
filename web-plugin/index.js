@@ -132,10 +132,6 @@ app.registerExtension({
         // poll the GPU status
         setInterval(updateGpuStatus, 5000);
 
-        const sendHeartbeat = async () => {
-            await fetch("/comfydeploy-heartbeat", { method: "GET" });
-        };
-
         const originalApiUrl = api.apiURL;
         api.apiURL = function (route) {
             if (this.remoteConfigured) {
@@ -158,7 +154,6 @@ app.registerExtension({
 
         const originalQueuePrompt = api.queuePrompt;
         api.queuePrompt = async function(number, { output, workflow }) {
-            await sendHeartbeat()
             try {
                 if (!this.remoteConfigured) {
                     console.log("GPU not configured. Provisioning..."); // Log the provisioning necessity
@@ -168,7 +163,6 @@ app.registerExtension({
                     this.init(); 
                 }
                 if (this.remoteConfigured) {
-                    await sendHeartbeat()
                     return await originalQueuePrompt.call(this, number, { output, workflow });
                 }
                 throw "Remote GPU not configured"
@@ -177,7 +171,6 @@ app.registerExtension({
                 cleanUp(); // Reset state and clean up connections
                 this.init();
                 throw error
-                // app.ui.dialog.show("Remote GPU has timed out. Increase timeout limit for your machine or try again");
             }
         }.bind(api);
     },

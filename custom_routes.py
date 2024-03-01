@@ -76,9 +76,12 @@ async def provision_gpu(request):
 
 @server.PromptServer.instance.routes.get("/worker_status")
 async def get_dedicated_worker_info(request):
-    global gpu_remote_url, gpu_state
+    global gpu_remote_url, gpu_state, last_heartbeat
     max_retries = 3
     attempts = 0
+
+    # heartbeat expected to only come from FE
+    last_heartbeat = time.time()
 
     if gpu_remote_url:
         while attempts < max_retries:
@@ -100,14 +103,6 @@ async def get_dedicated_worker_info(request):
                     gpu_remote_url = None
 
     return web.Response(text=json.dumps({"state": gpu_state, "url": gpu_remote_url}), status=200, content_type='application/json')
-
-
-@server.PromptServer.instance.routes.get("/comfydeploy-heartbeat")
-async def handle_heartbeat(request):
-    global last_heartbeat
-    print("extending heartbeat")
-    last_heartbeat = time.time()
-    return web.Response(text="Heartbeat received")
 
 async def check_inactivity():
     global last_heartbeat
