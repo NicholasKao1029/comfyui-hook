@@ -104,6 +104,30 @@ async def get_dedicated_worker_info(request):
 
     return web.Response(text=json.dumps({"state": gpu_state, "url": gpu_remote_url}), status=200, content_type='application/json')
 
+
+@server.PromptServer.instance.routes.get("/new_object_info")
+async def get_new_object_info(request):
+    return 
+
+    global COMFY_DEPLOY_URL 
+    machine_id = request.query.get('machine_id')
+    token = request.query.get('token')
+    if not machine_id:
+        return web.Response(text=json.dumps({"error": "Machine ID is required."}), status=400, content_type='application/json')
+
+    async with ClientSession() as session:
+        try:
+            async with session.get(f"{COMFY_DEPLOY_URL}/api/machines/{machine_id}", headers={"Authorization": f"Bearer {token}"}) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    return web.Response(text=json.dumps({"object_info": data.get("object_info", {})}), status=200, content_type='application/json')
+                else:
+                    return web.Response(text=json.dumps({"error": "Failed to fetch object info."}), status=response.status, content_type='application/json')
+        except Exception as e:
+            print(f"Error fetching new object info: {e}")
+            return web.Response(text=json.dumps({"error": "Failed to fetch object info."}), status=500, content_type='application/json')
+
+
 async def check_inactivity():
     global last_heartbeat
     while True:

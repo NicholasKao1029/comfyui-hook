@@ -173,5 +173,34 @@ app.registerExtension({
                 throw error
             }
         }.bind(api);
+
+        const OBJECT_INFO_CACHE_KEY = 'object_info';
+        const fetchAndCacheObjectInfo = async () => {
+            try {
+                const response = await fetch(`/new_object_info?machine_id=${machineId}&token=${token}`);
+                const data = await response.json();
+                if (response.ok && data.object_info) {
+                    localStorage.setItem(OBJECT_INFO_CACHE_KEY, JSON.stringify(data.object_info));
+                    return data.object_info;
+                } 
+                throw new Error(data.error || "Failed to fetch object info");
+            } catch (error) {
+                console.error("Error fetching object info:", error);
+                throw error;
+            }
+        };
+
+        // Modify the getNodeDefs function to use cached object information
+        api.getNodeDefs = async () => {
+            let objectInfo = localStorage.getItem(OBJECT_INFO_CACHE_KEY);
+            if (!objectInfo) {
+                objectInfo = await fetchAndCacheObjectInfo();
+            } else {
+                objectInfo = JSON.parse(objectInfo);
+            }
+            return objectInfo;
+        };
+
+        await fetchAndCacheObjectInfo();
     },
 });
